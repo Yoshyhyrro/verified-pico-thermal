@@ -1,0 +1,33 @@
+name: SMT Verification
+
+on: [push]
+
+jobs:
+  verify-thermal-logic:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Yices
+      run: |
+        wget https://github.com/SRI-CSL/yices2/releases/download/Yices-2.6.2/yices-2.6.2-x86_64-pc-linux-gnu.tar.gz
+        tar xzf yices-2.6.2-x86_64-pc-linux-gnu.tar.gz
+        sudo cp yices-2.6.2/bin/* /usr/local/bin/
+        sudo cp yices-2.6.2/lib/* /usr/local/lib/
+        sudo ldconfig
+    
+    - name: Setup Haskell Stack
+      uses: haskell-actions/setup@v2
+      with:
+        enable-stack: true
+    
+    - name: Run SMT tests
+      run: |
+        cd shake
+        stack test --test-arguments="--quickcheck-tests 100"
+    
+    - name: Verify constraints
+      run: |
+        cd shake
+        stack exec shake-build -- verify-thermal-model
