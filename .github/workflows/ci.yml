@@ -1,4 +1,4 @@
-name: Haskell CI
+name: Haskell CI (Stack)
 
 on:
   push:
@@ -16,28 +16,26 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - uses: actions/setup-haskell@v1
+    
+    - uses: haskell-actions/setup@v2
       with:
-        ghc-version: '8.10.3'
-        cabal-version: '3.2'
+        enable-stack: true
+        stack-no-global: true
 
-    - name: Cache
-      uses: actions/cache@v3
+    - name: Cache Stack
+      uses: actions/cache@v4
       env:
-        cache-name: cache-cabal
+        cache-name: cache-stack
       with:
-        path: ~/shake/verified-pico-thermal.cabal
-        key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('**/*.cabal') }}-${{ hashFiles('**/cabal.project') }}
+        # Cache global stack directory and local .stack-work
+        path: |
+          ~/.stack
+          .stack-work
+          shake/.stack-work
+        key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('stack.yaml') }}-${{ hashFiles('shake/package.yaml') }}
         restore-keys: |
           ${{ runner.os }}-build-${{ env.cache-name }}-
-          ${{ runner.os }}-build-
-          ${{ runner.os }}-
 
-    - name: Install dependencies
-      run: |
-        cabal update
-        cabal build --only-dependencies --enable-tests --enable-benchmarks
-    - name: Build
-      run: cabal build --enable-tests --enable-benchmarks all
-    - name: Run tests
-      run: cabal test all
+    # Stack automatically picks up the stack.yaml in the root directory
+    - name: Build and Test
+      run: stack test
