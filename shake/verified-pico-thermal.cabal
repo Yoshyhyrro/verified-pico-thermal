@@ -66,4 +66,5 @@ test-suite shake-test
     , tasty >=1.4
     , tasty-hunit >=0.10
     , text >=2.0
+    , vector >=0.13
   default-language: Haskell2010

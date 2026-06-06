@@ -36,6 +36,7 @@ tests:
     dependencies:
       - tasty >= 1.4
       - tasty-hunit >= 0.10
+      - vector >= 0.13
 
 default-extensions:
   - OverloadedStrings
