@@ -9,7 +9,7 @@ category:            Build
 build-type:          Simple
 
 dependencies:
-  - base >= 4.22.0.0 && < 5
+  - base >= 4.20 && < 5
   - shake >= 0.19.3
   - hasmtlib >= 2.8.1
   - directory >= 1.3.7
@@ -28,15 +28,12 @@ executables:
       - -threaded
       - -rtsopts
       - -with-rtsopts=-N4
-    dependencies:
-      - verified-pico-thermal
 
 tests:
   shake-test:
     main:                Spec.hs
     source-dirs:         test
     dependencies:
-      - verified-pico-thermal
       - tasty >= 1.4
       - tasty-hunit >= 0.10
 

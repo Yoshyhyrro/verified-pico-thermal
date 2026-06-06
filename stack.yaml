@@ -65,3 +65,6 @@ packages:
 #
 # Allow a newer minor version of GHC than the snapshot specifies
 # compiler-check: newer-minor
+extra-deps:
+  - hasmtlib-2.8.1@sha256:db79194f88adc81a6171c00e785d3ff1e75cac56f1f0544a730c7a73c1cf8995,4662
+  - constrained-some-0.1.2@sha256:9e34a3a65960b5ebf49cc3e3264d4bf83e3a746e1b11fca6a1427b2f809bca57,1434

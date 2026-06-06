@@ -7,96 +7,103 @@ import Development.Shake
 import Development.Shake.Command
 import Development.Shake.FilePath
 import Development.Shake.Util
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing)
 import System.FilePath ((</>))
-import qualified Data.Text as T
-import qualified Data.Text.IO as TIO
 import Control.Monad (when, forM_)
 import System.Log.Logger
 import System.Process (callCommand)
+import System.Log.Handler.Simple (streamHandler)
+import System.IO (stdout)
 
--- ロガーの初期化
+-- Initialize the logger
+-- streamHandler does not expose 'streamHandlerFormat' as a record field;
+-- just attach the handler directly.
 initLogger :: IO ()
 initLogger = do
-  updateGlobalLogger "Shake" (setLevel INFO)
-  updateGlobalLogger "Shake" (setHandlers [consoleHandler])
+  handler <- streamHandler stdout INFO
+  updateGlobalLogger rootLoggerName (setLevel INFO . setHandlers [handler])
 
 main :: IO ()
 main = do
   initLogger
   putStrLn "=== Thermal Camera Shake Build System ==="
   putStrLn "Stack-managed build started..."
-  
+
+  -- NOTE: Do NOT redefine ShakeOptions here; use Shake's built-in type.
   shakeArgs shakeOptions { shakeFiles = "_shake" } $ do
+
     -- ============================================
-    -- ルール定義
+    -- Rule definitions
     -- ============================================
-    
-    -- 初期化ルール
+
+    -- Initialisation rule
     phony "init" $ do
-      putNormal "🚀 Initializing project directories..."
-      liftIO $ initDirectories
-      liftIO $ generateTemplateFiles
-      putNormal "✅ Project initialized successfully"
-    
-    -- Chisel → Verilog 変換
+      putNormal "Initializing project directories..."
+      liftIO initDirectories
+      liftIO generateTemplateFiles
+      putNormal "Project initialized successfully"
+
+    -- Chisel -> Verilog conversion
     "verilog/generated/*.v" %> \out -> do
       let moduleName = takeBaseName out
-      putNormal $ "🔨 Generating Verilog for " ++ moduleName
-      
-      -- Chisel プロジェクトの存在確認
+      putNormal $ "Generating Verilog for " ++ moduleName
+
+      -- Confirm the Chisel project exists
       need ["chisel/build.sbt"]
-      
-      -- sbt 実行
-      cmd_ "cd chisel && sbt \"runMain top." ++ moduleName ++ "\""
-      
-      -- 生成ファイルをコピー
+
+      -- Run sbt
+      cmd_ $ "cd chisel && sbt \"runMain top." ++ moduleName ++ "\""
+
+      -- Copy generated file to output location
       let generatedPath = "chisel/generated/" ++ moduleName ++ ".v"
-      exists <- liftIO $ doesFileExist generatedPath
+      exists <- doesFileExist generatedPath   -- Shake's Action-level doesFileExist; no liftIO needed
       when exists $ copyFile' generatedPath out
-    
-    -- C++ プロジェクトのビルド
+
+    -- C++ project build
     "build/testbench" %> \out -> do
       let buildDir = "cpp/build"
-      need ["cpp/CMakeLists.txt"
-           ,"cpp/src/testbench.cpp"
-           ,"cpp/src/mlx90640_model.cpp"]
-      
-      putNormal "🔨 Building C++ testbench..."
-      cmd_ "cmake -B" buildDir " -S cpp -DCMAKE_BUILD_TYPE=Release"
-      cmd_ "cmake --build" buildDir " --target testbench -j4"
+      need [ "cpp/CMakeLists.txt"
+           , "cpp/src/testbench.cpp"
+           , "cpp/src/mlx90640_model.cpp"
+           ]
+
+      putNormal "Building C++ testbench..."
+      -- Note the space after "-B" and "--build" to avoid "cmake -Bcpp/build"
+      cmd_ $ "cmake -B " ++ buildDir ++ " -S cpp -DCMAKE_BUILD_TYPE=Release"
+      cmd_ $ "cmake --build " ++ buildDir ++ " --target testbench -j4"
       copyFile' (buildDir </> "testbench") out
-    
-    -- テスト実行
+
+    -- Run tests
     phony "test" $ do
       need ["build/testbench"]
-      putNormal "🧪 Running tests..."
+      putNormal "Running tests..."
       cmd_ "build/testbench --run-tests"
-    
-    -- シミュレーション実行
+
+    -- Run simulation
     phony "sim" $ do
-      need ["verilog/generated/I2CMaster.v"
-           ,"verilog/generated/ThermalNormalizer.v"
-           ,"build/testbench"]
-      putNormal "⚙️ Running simulation..."
+      need [ "verilog/generated/I2CMaster.v"
+           , "verilog/generated/ThermalNormalizer.v"
+           , "build/testbench"
+           ]
+      putNormal "Running simulation..."
       cmd_ "build/testbench --verilog verilog/generated/"
-    
-    -- クリーン
+
+    -- Clean build artifacts
     phony "clean" $ do
-      putNormal "🧹 Cleaning build artifacts..."
+      putNormal "Cleaning build artifacts..."
       liftIO $ callCommand "rm -rf build/ verilog/generated/ cpp/build/ chisel/generated/"
       removeFilesAfter "_shake" ["*"]
-    
-    -- CI 用ターゲット
+
+    -- CI target
     phony "ci" $ do
       need ["init", "test"]
-      putNormal "✅ CI build completed successfully"
-    
-    -- デフォルトターゲット
+      putNormal "CI build completed successfully"
+
+    -- Default targets
     want ["init", "test"]
 
 -- ============================================
--- ヘルパー関数
+-- Helper functions
 -- ============================================
 
 initDirectories :: IO ()
@@ -118,8 +125,8 @@ initDirectories = do
 
 generateTemplateFiles :: IO ()
 generateTemplateFiles = do
-  putStrLn "📝 Generating template files..."
-  
+  putStrLn "Generating template files..."
+
   -- build.sbt
   writeFile "chisel/build.sbt" $ unlines
     [ "scalaVersion := \"2.13.12\""
@@ -127,7 +134,7 @@ generateTemplateFiles = do
     , "libraryDependencies += \"edu.berkeley.cs\" %% \"chiseltest\" % \"0.6.0\" % \"test\""
     , "scalacOptions ++= Seq(\"-Xsource:2.13\", \"-deprecation\", \"-feature\")"
     ]
-  
+
   -- CMakeLists.txt
   writeFile "cpp/CMakeLists.txt" $ unlines
     [ "cmake_minimum_required(VERSION 3.10)"
@@ -140,8 +147,8 @@ generateTemplateFiles = do
     , ")"
     , "target_link_libraries(testbench pthread)"
     ]
-  
-  -- テンプレートヘッダー
+
+  -- Template header
   writeFile "cpp/include/mlx90640_model.h" $ unlines
     [ "#pragma once"
     , "#include <cstdint>"
@@ -156,8 +163,8 @@ generateTemplateFiles = do
     , "    uint8_t regs[256];"
     , "};"
     ]
-  
-  -- テンプレート実装
+
+  -- Template implementation
   writeFile "cpp/src/mlx90640_model.cpp" $ unlines
     [ "#include \"mlx90640_model.h\""
     , "#include <cstring>"
@@ -180,8 +187,8 @@ generateTemplateFiles = do
     , "    return true;"
     , "}"
     ]
-  
-  -- テストベンチ
+
+  -- Testbench
   writeFile "cpp/src/testbench.cpp" $ unlines
     [ "#include <iostream>"
     , "#include \"mlx90640_model.h\""
@@ -199,7 +206,7 @@ generateTemplateFiles = do
     , "    return 1;"
     , "}"
     ]
-  
+
   -- .gitignore
   writeFile ".gitignore" $ unlines
     [ "*.o"
@@ -213,7 +220,7 @@ generateTemplateFiles = do
     , "_shake/"
     , "bin/"
     ]
-  
+
   -- README
   writeFile "README.md" $ unlines
     [ "# Thermal Camera with Chisel + Shake"
