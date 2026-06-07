@@ -1,21 +1,29 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings  #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TypeApplications   #-}
+{-# LANGUAGE LambdaCase         #-}
+{-# LANGUAGE DataKinds          #-}   -- required for @BoolSort / @IntSort
+
+-- Disambiguate Language.Hasmtlib.Boolean.(&&) and .not from Prelude;
+-- hasmtlib's Boolean class has Bool instances so behaviour is identical.
+import Prelude hiding (not, (&&))
 
 module ThermalSMT where
 
-import Language.Hasmtlib hiding ((&&), (!))
-import Language.Hasmtlib.Solver.Z3
-import qualified Data.Vector as V
-import Data.Vector (Vector)
+import Language.Hasmtlib                  -- exports Boolean, Orderable, Equatable, ite …
+import Data.Vector (Vector)               -- NOT (!): that would clash with Relation.!
+import qualified Data.Vector as V         -- use V.! throughout
 import Control.Monad (forM, forM_, when)
 import Control.Monad.IO.Class (liftIO)
-import qualified Data.Map.Strict as Map
+import Data.Maybe (fromMaybe, join)
+
+-- ---------------------------------------------------------------------------
+-- Types
+-- ---------------------------------------------------------------------------
 
 -- Temperature data type (fixed-point: scaled by 10 to integer)
 type TempCelsius = Double
-type TempScaled  = Int
+type TempScaled  = Int   -- °C × 10  (e.g. 36.5 °C → 365)
 
 -- Image dimensions
 width, height :: Int
@@ -25,161 +33,222 @@ height = 24
 totalPixels :: Int
 totalPixels = width * height
 
--- SMT variable types
+-- Container for the SMT variables of one problem instance.
+-- Uses Expr rather than SMTVar because Language.Hasmtlib.var returns Expr t.
 data ThermalConstraints = ThermalConstraints
-    { animalMask       :: [SMTVar Bool]
-    , animalTemp       :: SMTVar Int
-    , groundTemp       :: SMTVar Int
-    , maxSolarTemp     :: SMTVar Int
-    , smoothnessPenalty :: [SMTVar Int]
+    { animalMask        :: [Expr BoolSort]   -- whether each pixel contains an animal
+    , animalTemp        :: Expr IntSort      -- animal body temperature (°C × 10)
+    , groundTemp        :: Expr IntSort      -- ground / background temperature
+    , maxSolarTemp      :: Expr IntSort      -- maximum solar-reflection temperature
+    , smoothnessPenalty :: [Expr IntSort]    -- auxiliary variables for spatial smoothing
     }
 
--- Physical constraints (pure SMT expression)
-physicalConstraints ::
-    SMTVar Int ->
-    SMTVar Int ->
-    SMTVar Int ->
-    SExpr
-physicalConstraints tAnimal tGround tSolar =
-    let higherThanGround = tAnimal .> (tGround + 50)
-        solarVsAnimal    = tSolar  .> (tAnimal + 100)
-    in higherThanGround .&& solarVsAnimal
+-- ---------------------------------------------------------------------------
+-- Physical constraints helper (currently unused; kept as reference)
+-- ---------------------------------------------------------------------------
 
+-- | Pure conjunction of the physical domain constraints.
+--   Does NOT require any monadic context – just builds an Expr BoolSort.
+physicalConstraints
+    :: Expr IntSort   -- ^ animal body temperature
+    -> Expr IntSort   -- ^ ground temperature
+    -> Expr IntSort   -- ^ max solar-reflection temperature
+    -> Expr BoolSort
+physicalConstraints tAnimal tGround tSolar =
+    -- 1–3. Physiological / environment ranges
+    (tAnimal >=? 350 && tAnimal <=? 440)  -- 35–44 °C
+ && (tGround >=? 150 && tGround <=? 500)  -- 15–50 °C
+ && (tSolar  >=? 450 && tSolar  <=? 800)  -- 45–80 °C
+    -- 4. Animal is warmer than ground (active)
+ && tAnimal >? (tGround + 50)             -- ≥ 5 °C above ground
+    -- 5. Solar spike is much hotter than animal
+ && tSolar  >? (tAnimal + 100)            -- ≥ 10 °C above animal
+
+-- ---------------------------------------------------------------------------
 -- Main SMT inference engine
-inferAnimalRegion ::
-    Vector TempScaled ->
-    IO (Maybe [Bool])
+-- ---------------------------------------------------------------------------
+
+-- | Given a raw thermal frame, infer which pixels belong to an animal.
+--
+-- Uses hasmtlib's 'interactiveWith' (incremental, Pipe-based) so that we can
+-- call 'checkSat' and 'getValue' inside the solver context.
+-- 'interactiveWith' returns @m (Maybe a)@; we 'join' the outer layer away.
+inferAnimalRegion
+    :: Vector TempScaled    -- ^ raw thermal frame (sensor value × 10)
+    -> IO (Maybe [Bool])    -- ^ animal-region mask, or Nothing if UNSAT
 inferAnimalRegion thermalData = do
-    result <- runSolver @Z3 $ do
+    mResult <- interactiveWith yices $ do
+        setOption $ ProduceModels True
+        setOption $ Incremental   True
+        setLogic "QF_LIA"          -- quantifier-free linear integer arithmetic
 
         -- === Variable Declaration ===
-        animal  <- forM [0..totalPixels-1] $ \_ -> var $ sort @Bool
-        tAnimal <- var $ sort @Int
-        tGround <- var $ sort @Int
-        tSolar  <- var $ sort @Int
+        -- One Bool variable per pixel (is it an animal pixel?)
+        animal  <- forM [0..totalPixels-1] $ \_ -> var @BoolSort
+        -- Shared continuous temperatures
+        tAnimal <- var @IntSort
+        tGround <- var @IntSort
+        tSolar  <- var @IntSort
 
-        -- === Constraints Based on Measurements ===
+        -- === Measurement-Based Constraints ===
+        -- Relate each pixel's measured temperature to the class variables.
         forM_ [0..totalPixels-1] $ \idx -> do
-            let measuredTemp = thermalData V.! idx
+            let measuredTemp = fromIntegral (thermalData V.! idx) :: Expr IntSort
 
-            let ifAnimal = var2Bool (animal !! idx)
-            let animalTempConstraint =
-                    ifAnimal ==> (measuredTemp .== tAnimal)
+            -- Animal pixel  → temperature must equal the animal-body value
+            let isAnimal = animal !! idx
+            assert $ isAnimal ==> (measuredTemp === tAnimal)
 
-            let notAnimal = bnot ifAnimal
-            let backgroundConstraint =
-                    notAnimal ==> (measuredTemp .<= tSolar)
-
-            assert $ animalTempConstraint .&& backgroundConstraint
+            -- Background pixel → temperature must be at most the solar spike
+            assert $ not isAnimal ==> (measuredTemp <=? tSolar)
 
         -- === Physical Constraints ===
-        assert $ tAnimal .>= 350 .&& tAnimal .<= 440
-        assert $ tGround .>= 150 .&& tGround .<= 500
-        assert $ tSolar  .>= 450 .&& tSolar  .<= 800
-        assert $ tAnimal .> (tGround + 30)
-        assert $ tSolar  .> (tAnimal + 80)
+        -- Body temperature range (35–44 °C)
+        assert $ tAnimal >=? 350 && tAnimal <=? 440
+        -- Ground temperature range (15–50 °C)
+        assert $ tGround >=? 150 && tGround <=? 500
+        -- Solar-reflection range (45–80 °C)
+        assert $ tSolar  >=? 450 && tSolar  <=? 800
+        -- Animal is warmer than ground
+        assert $ tAnimal >? (tGround + 30)
+        -- Solar spike is much hotter than animal
+        assert $ tSolar  >? (tAnimal + 80)
 
         -- === Spatial Smoothing Constraints ===
-        forM_ [0..height-1] $ \y ->
-            forM_ [0..width-1] $ \x -> do
-                let idx = y * width + x
-                when (x < width-1) $ do
-                    let rightIdx = y * width + (x+1)
-                    let sameAnimal =
-                            (var2Bool $ animal !! idx) .==
-                            (var2Bool $ animal !! rightIdx)
-
+        -- Adjacent pixels with similar measured temperature → same class.
+        forM_ [0..height-1] $ \row ->
+            forM_ [0..width-1] $ \col -> do
+                let idx = row * width + col
+                when (col < width - 1) $ do
+                    let rightIdx = row * width + (col + 1)
                     let tempDiff = abs (thermalData V.! idx - thermalData V.! rightIdx)
+                    when (tempDiff <= 50) $   -- within 5 °C → same region
+                        assert $ (animal !! idx) === (animal !! rightIdx)
 
-                    when (tempDiff <= 50) $
-                        assert $ sameAnimal .|| (tempDiff .> 50)
-
-        -- === Minimum Region Size Constraint ===
-        let animalCount = sum [ ite (var2Bool $ animal !! i) 1 0
-                              | i <- [0..totalPixels-1] ]
-        assert $ animalCount .>= 4
-
-        -- === Optimization Objective ===
-        let variancePenalty =
-                sum [ ite (var2Bool $ animal !! i)
-                        (abs (thermalData V.! i - tAnimal))
-                        0
+        -- === Minimum Region-Size Constraint ===
+        -- Require at least 4 animal pixels (filters single-pixel noise).
+        let animalCount =
+                sum [ ite (animal !! i) (1 :: Expr IntSort) 0
                     | i <- [0..totalPixels-1] ]
+        assert $ animalCount >=? 4
 
-        check $ Minimize $ MkPriorityLevel (mkSym "var") variancePenalty
-
-        -- === Model Extraction ===
+        -- === Solve & Extract ===
         checkSat >>= \case
             Sat -> do
+                -- getValue returns Maybe (HaskellType t):
+                --   Expr BoolSort  →  Maybe Bool
                 animalVals <- forM [0..totalPixels-1] $ \i ->
                     getValue (animal !! i)
-                return $ Just animalVals
-            _ -> return Nothing
+                return $ Just (map (fromMaybe False) animalVals)
+            _   -> return Nothing
 
-    return result
+    -- interactiveWith returns IO (Maybe a); join collapses Maybe (Maybe [Bool])
+    return $ join mResult
 
--- Detect spectral characteristics of solar reflection
-detectSolarReflection ::
-    Vector TempScaled ->
-    IO [Int]
-detectSolarReflection thermalData = runSolver @Z3 $ do
-    isSolar <- forM [0..totalPixels-1] $ \_ -> var $ sort @Bool
+-- ---------------------------------------------------------------------------
+-- Detect solar-reflection pixels (pure Haskell – no SMT needed)
+-- ---------------------------------------------------------------------------
 
-    forM_ [0..totalPixels-1] $ \idx -> do
-        let temp = thermalData V.! idx
-
-        let isHot = temp .>= 500
-
-        let neighbors =
+-- | Return indices of pixels that look like solar reflections:
+--   very hot AND significantly hotter than their neighbourhood.
+detectSolarReflection
+    :: Vector TempScaled
+    -> IO [Int]          -- suspected solar-reflection pixel indices
+detectSolarReflection thermalData = return
+    [ idx
+    | idx <- [0..totalPixels-1]
+    , let temp = thermalData V.! idx
+    -- 1. Very high temperature (≥ 50 °C)
+    , temp >= 500
+    , let neighbors =
+            filter (\n -> n >= 0 && n < totalPixels)
                 [ idx - width - 1, idx - width, idx - width + 1
-                , idx - 1,                     idx + 1
-                , idx + width - 1, idx + width, idx + width + 1 ]
+                , idx - 1,                       idx + 1
+                , idx + width - 1, idx + width,  idx + width + 1 ]
+    , not (null neighbors)
+    -- 2. At least 20 °C hotter than the average of surrounding pixels
+    , let avgNeighbor =
+            sum [ thermalData V.! n | n <- neighbors ]
+            `div` length neighbors
+    , (temp - avgNeighbor) >= 200
+    ]
 
-        let validNeighbors = filter (\n -> n >= 0 && n < totalPixels) neighbors
-        let avgNeighbor =
-                sum [thermalData V.! n | n <- validNeighbors]
-                `div` length validNeighbors
+-- ---------------------------------------------------------------------------
+-- Temporal filter (pure Haskell)
+-- ---------------------------------------------------------------------------
 
-        let isIsolated = (temp - avgNeighbor) .>= 200
+-- | Classify pixels by temporal stability:
+--   stable temperature ≈ animal, rapidly-changing ≈ solar reflection.
+temporalFilter
+    :: [Vector TempScaled]  -- past frames, most recent last
+    -> IO [Bool]            -- animal-region mask for the latest frame
+temporalFilter frames = return
+    [ let ct = currentFrame V.! idx
+          pt = prevFrame    V.! idx
+          d  = abs (ct - pt)
+      in  d <= 5 && not (d >= 30)   -- stable AND not rapidly-changing
+    | idx <- [0..totalPixels-1]
+    ]
+  where
+    currentFrame = last frames
+    prevFrame    = if length frames >= 2
+                   then frames !! (length frames - 2)
+                   else currentFrame
 
-        assert $ var2Bool (isSolar !! idx) .== (isHot .&& isIsolated)
+-- ---------------------------------------------------------------------------
+-- Integrated inference pipeline
+-- ---------------------------------------------------------------------------
 
-    checkSat >>= \case
-        Sat -> do
-            solarVals <- forM [0..totalPixels-1] $ \i -> getValue (isSolar !! i)
-            return [i | (i, True) <- zip [0..] solarVals]
-        _ -> return []
+-- | Full analysis pipeline: exclude solar artefacts, apply temporal filter,
+--   then run SMT-based region inference.
+analyzeThermalImage
+    :: Vector TempScaled              -- current frame
+    -> Maybe [Vector TempScaled]      -- past frames (for temporal filter)
+    -> IO (Maybe AnimalDetectionResult)
+analyzeThermalImage currentFrame pastFrames = do
+    -- Step 1: exclude solar-reflection pixels
+    solarPixels <- detectSolarReflection currentFrame
+    putStrLn $ "Detected solar reflections: "
+             ++ show (length solarPixels) ++ " pixels"
 
--- Temporal filtering using time-series data
-temporalFilter ::
-    [Vector TempScaled] ->
-    IO [Bool]
-temporalFilter frames = runSolver @Z3 $ do
-    let currentFrame = last frames
-    let prevFrame    = if length frames >= 2
-                       then frames !! (length frames - 2)
-                       else currentFrame
+    -- Step 2: temporal filter (when history is available)
+    temporalMask <- case pastFrames of
+        Just frames -> temporalFilter (frames ++ [currentFrame])
+        Nothing     -> return $ replicate totalPixels True
 
-    isAnimal <- forM [0..totalPixels-1] $ \_ -> var $ sort @Bool
+    -- Step 3: SMT-based animal-region inference on the masked frame
+    let filteredData = V.imap
+            (\idx temp ->
+                if idx `elem` solarPixels
+                then 0      -- zero-out solar reflections
+                else temp)
+            currentFrame
 
-    forM_ [0..totalPixels-1] $ \idx -> do
-        let currentTemp = currentFrame V.! idx
-        let prevTemp    = prevFrame    V.! idx
-        let tempDiff    = abs (currentTemp - prevTemp)
+    animalMask <- inferAnimalRegion filteredData
 
-        let stableTemp  = tempDiff .<= 5
-        let rapidChange = tempDiff .>= 30
+    -- Step 4: combine results
+    case animalMask of
+        Nothing   -> return Nothing
+        Just mask -> do
+            let finalMask   = zipWith (&&) mask temporalMask
+                animalTemps =
+                    [ fromIntegral (currentFrame V.! i) / 10.0
+                    | (i, isAnimal) <- zip [0..] finalMask
+                    , isAnimal ]
+                mean  = if null animalTemps then 0
+                        else sum animalTemps / fromIntegral (length animalTemps)
+            return $ Just AnimalDetectionResult
+                { resultMask            = finalMask
+                , animalTemperatureMean = mean
+                , animalTemperatureMin  = if null animalTemps then 0 else minimum animalTemps
+                , animalTemperatureMax  = if null animalTemps then 0 else maximum animalTemps
+                , solarReflections      = solarPixels
+                }
 
-        assert $ var2Bool (isAnimal !! idx) .==
-                (stableTemp .&& bnot rapidChange)
+-- ---------------------------------------------------------------------------
+-- Result type
+-- ---------------------------------------------------------------------------
 
-    checkSat >>= \case
-        Sat -> do
-            animalVals <- forM [0..totalPixels-1] $ \i -> getValue (isAnimal !! i)
-            return animalVals
-        _ -> return $ replicate totalPixels False
-
--- === Integrated Inference Pipeline ===
 data AnimalDetectionResult = AnimalDetectionResult
     { resultMask            :: [Bool]
     , animalTemperatureMean :: Double
@@ -187,41 +256,3 @@ data AnimalDetectionResult = AnimalDetectionResult
     , animalTemperatureMax  :: Double
     , solarReflections      :: [Int]
     } deriving (Show)
-
-analyzeThermalImage ::
-    Vector TempScaled ->
-    Maybe [Vector TempScaled] ->
-    IO (Maybe AnimalDetectionResult)
-analyzeThermalImage currentFrame pastFrames = do
-
-    solarPixels <- detectSolarReflection currentFrame
-    putStrLn $ "Detected solar reflections: " ++ show (length solarPixels) ++ " pixels"
-
-    temporalMask <- case pastFrames of
-        Just frames -> temporalFilter (frames ++ [currentFrame])
-        Nothing     -> return $ replicate totalPixels True
-
-    let filteredData = V.imap (\idx temp ->
-                            if idx `elem` solarPixels
-                            then 0
-                            else temp) currentFrame
-
-    animalMask <- inferAnimalRegion filteredData
-
-    case animalMask of
-        Just mask -> do
-            let finalMask = zipWith (&&) mask temporalMask
-
-            let animalTemps =
-                    [ fromIntegral (currentFrame V.! i) / 10.0
-                    | (i, True) <- zip [0..] finalMask ]
-
-            return $ Just AnimalDetectionResult
-                { resultMask            = finalMask
-                , animalTemperatureMean = if null animalTemps then 0
-                                          else sum animalTemps / fromIntegral (length animalTemps)
-                , animalTemperatureMin  = if null animalTemps then 0 else minimum animalTemps
-                , animalTemperatureMax  = if null animalTemps then 0 else maximum animalTemps
-                , solarReflections      = solarPixels
-                }
-        Nothing -> return Nothing
