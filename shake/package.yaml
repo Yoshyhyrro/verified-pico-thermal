@@ -10,6 +10,8 @@ build-type:          Simple
 
 # all the dependencies required to build the project, including Shake and any libraries used in the build scripts
 dependencies:
+  - vector >= 0.13
+  - containers >= 0.6.4
   - base >= 4.20 && < 5
   - shake >= 0.19.3
   - hasmtlib >= 2.8.1
