@@ -1,15 +1,14 @@
-{-# LANGUAGE OverloadedStrings  #-}
+{-# LANGUAGE OverloadedStrings   #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE TypeApplications   #-}
-{-# LANGUAGE LambdaCase         #-}
-{-# LANGUAGE DataKinds          #-}   -- required for @BoolSort / @IntSort
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE DataKinds           #-}   -- required for @BoolSort / @IntSort
+
+module ThermalSMT where
 
 -- Disambiguate Language.Hasmtlib.Boolean.(&&) and .not from Prelude;
 -- hasmtlib's Boolean class has Bool instances so behaviour is identical.
 import Prelude hiding (not, (&&))
-
-module ThermalSMT where
-
 import Language.Hasmtlib                  -- exports Boolean, Orderable, Equatable, ite …
 import Data.Vector (Vector)               -- NOT (!): that would clash with Relation.!
 import qualified Data.Vector as V         -- use V.! throughout
