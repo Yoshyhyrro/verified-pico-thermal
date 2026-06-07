@@ -8,6 +8,7 @@ maintainer:          je-suis-1oeuf-devautour@proton.me
 category:            Build
 build-type:          Simple
 
+# all the dependencies required to build the project, including Shake and any libraries used in the build scripts
 dependencies:
   - base >= 4.20 && < 5
   - shake >= 0.19.3
@@ -20,10 +21,18 @@ dependencies:
   - hslogger >= 1.3.2.0
   - extra >= 1.7.12
 
+# ★here which is the library section, we can specify the source directories and exposed modules if needed.
+library:
+  source-dirs: src
+  #if that's needed, you can specify exposed-modules here
+
 executables:
   shake-build:
     main:                Main.hs
     source-dirs:         app
+    # run-time options for better performance, especially when using multiple cores
+    dependencies:
+      - verified-pico-thermal
     ghc-options:
       - -threaded
       - -rtsopts
@@ -37,7 +46,7 @@ tests:
       - tasty >= 1.4
       - tasty-hunit >= 0.10
       - vector >= 0.13
-      - verified-pico-thermal
+      - verified-pico-thermal # this allows the test suite to access the library code
 
 default-extensions:
   - OverloadedStrings
