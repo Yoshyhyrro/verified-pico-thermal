@@ -45,6 +45,7 @@ tests:
     main:                Spec.hs
     source-dirs:         test
     dependencies:
+      - containers >= 0.6.4
       - tasty >= 1.4
       - tasty-hunit >= 0.10
       - vector >= 0.13
