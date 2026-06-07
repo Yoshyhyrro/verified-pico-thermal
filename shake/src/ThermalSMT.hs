@@ -1,6 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE LambdaCase #-}          -- required for \case syntax
 
 module ThermalSMT where
 
@@ -8,269 +9,276 @@ import Language.Hasmtlib
 import Language.Hasmtlib.Solver.Yices
 import Data.Vector (Vector, (!))
 import qualified Data.Vector as V
-import Control.Monad (forM_, when)
+import Control.Monad (forM, forM_, when)   -- added forM (was missing)
 import Control.Monad.IO.Class (liftIO)
 import qualified Data.Map.Strict as Map
 
--- 温度データ型（固定小数点：10倍して整数に）
+-- Temperature data type (fixed-point: scaled by 10 to integer)
 type TempCelsius = Double
-type TempScaled = Int  -- 実際は℃ * 10（例：36.5℃ → 365）
+type TempScaled  = Int  -- Actual value is °C * 10 (e.g., 36.5°C → 365)
 
--- 画像サイズ
+-- Image dimensions
 width, height :: Int
-width = 32
+width  = 32
 height = 24
+
+totalPixels :: Int  -- explicit type annotation added
 totalPixels = width * height
 
--- SMT変数の型
+-- SMT variable types
 data ThermalConstraints = ThermalConstraints
-    { animalMask :: [SMTVar Bool]        -- 各ピクセルが動物かどうか
-    , animalTemp :: SMTVar Int           -- 動物の体温（℃×10）
-    , groundTemp :: SMTVar Int           -- 地面/背景の温度
-    , maxSolarTemp :: SMTVar Int         -- 太陽光反射の最大温度
-    , smoothnessPenalty :: [SMTVar Int]  -- 空間的平滑化の変数
+    { animalMask       :: [SMTVar Bool]       -- Whether each pixel contains an animal
+    , animalTemp       :: SMTVar Int          -- Animal body temperature (°C × 10)
+    , groundTemp       :: SMTVar Int          -- Ground/background temperature
+    , maxSolarTemp     :: SMTVar Int          -- Maximum temperature from solar reflection
+    , smoothnessPenalty :: [SMTVar Int]       -- Variables for spatial smoothing
     }
 
--- 物理的制約（知識ベース）
-physicalConstraints :: 
-    SMTVar Int ->      -- 動物体温
-    SMTVar Int ->      -- 地面温度
-    SMTVar Int ->      -- 太陽光反射最大温度
-    SMTCtx () ->       -- 実際の測定値から計算される制約
+-- Physical constraints (knowledge base)
+-- NOTE: this helper is currently unused; kept for reference.
+-- Removed erroneous 4th parameter (SMTCtx () ->) and monadic do-notation
+-- so the type correctly matches a pure SBool expression.
+physicalConstraints ::
+    SMTVar Int ->  -- Animal body temperature
+    SMTVar Int ->  -- Ground temperature
+    SMTVar Int ->  -- Max solar reflection temperature
     SBool
-physicalConstraints tAnimal tGround tSolar = do
-    -- 1. 動物体温の生理的範囲（哺乳類/鳥類）
-    let minMammalTemp = 350  -- 35.0℃
-        maxMammalTemp = 420  -- 42.0℃
-        minBirdTemp = 380    -- 38.0℃
-        maxBirdTemp = 440    -- 44.0℃
-    
-    -- 2. 地面温度の範囲（日陰/日向）
-    let minGroundTemp = 150  -- 15.0℃
-        maxGroundTemp = 500  -- 50.0℃（直射日光下）
-    
-    -- 3. 太陽光反射の特徴（急峻なピーク）
-    let solarReflectMin = 450  -- 45.0℃以上（金属/ガラス反射）
-        solarReflectMax = 800  -- 80.0℃（理論上限）
-    
-    -- 4. 動物体温は地面より高い（活動中）
-    let higherThanGround = tAnimal .> (tGround + 50)  -- 最低5℃高い
-    
-    -- 5. 太陽反射は動物より著しく高い
-    let solarVsAnimal = tSolar .> (tAnimal + 100)  -- 10℃以上高い
-    
-    -- 6. 太陽反射の温度勾配制約（隣接ピクセルとの差）
-    --   （実際のループで実装）
-    
-    return $ higherThanGround .&& solarVsAnimal
+physicalConstraints tAnimal tGround tSolar =
+    let -- 1. Physiological range for animal body temperature (mammals/birds)
+        --    minMammalTemp = 350  -- 35.0°C
+        --    maxMammalTemp = 420  -- 42.0°C
+        --    minBirdTemp   = 380  -- 38.0°C
+        --    maxBirdTemp   = 440  -- 44.0°C
+        --
+        -- 2. Ground temperature range (shade/sunlight)
+        --    minGroundTemp = 150  -- 15.0°C
+        --    maxGroundTemp = 500  -- 50.0°C (under direct sunlight)
+        --
+        -- 3. Solar reflection characteristics (sharp peak)
+        --    solarReflectMin = 450  -- 45.0°C or above (metal/glass reflection)
+        --    solarReflectMax = 800  -- 80.0°C (theoretical upper limit)
 
--- メインのSMT推論エンジン
-inferAnimalRegion :: 
-    Vector TempScaled ->  -- 生の温度データ（センサー値×10）
-    IO (Maybe [Bool])     -- 動物領域マスク
+        -- 4. Animal body temperature is higher than ground (while active)
+        higherThanGround = tAnimal .> (tGround + 50)  -- at least 5°C higher
+
+        -- 5. Solar reflection is significantly higher than animal temperature
+        solarVsAnimal    = tSolar .> (tAnimal + 100)  -- at least 10°C higher
+
+        -- 6. Temperature gradient constraint for solar reflection
+        --    (difference with adjacent pixels — implemented in the main loop)
+
+    in higherThanGround .&& solarVsAnimal
+
+-- Main SMT inference engine
+inferAnimalRegion ::
+    Vector TempScaled ->  -- Raw thermal data (sensor value × 10)
+    IO (Maybe [Bool])     -- Animal region mask
 inferAnimalRegion thermalData = do
-    -- Yicesソルバーの初期化
+    -- Initialize the Yices solver
     result <- runSolver @Yices $ do
-        
-        -- === 変数宣言 ===
-        -- 各ピクセルが動物かどうか
-        animal <- forM [0..totalPixels-1] $ \_ -> var $ sort @Bool
-        -- 体温の連続値
+
+        -- === Variable Declaration ===
+        -- Whether each pixel belongs to an animal
+        animal  <- forM [0..totalPixels-1] $ \_ -> var $ sort @Bool
+        -- Continuous temperature values
         tAnimal <- var $ sort @Int
         tGround <- var $ sort @Int
-        tSolar <- var $ sort @Int
-        
-        -- === 測定値に基づく制約 ===
-        -- 各ピクセルの実際の温度と変数の関係
+        tSolar  <- var $ sort @Int
+
+        -- === Constraints Based on Measurements ===
+        -- Relationship between each pixel's actual temperature and variables
         forM_ [0..totalPixels-1] $ \idx -> do
             let measuredTemp = thermalData ! idx
-            
-            -- もし動物なら、温度は動物体温範囲内
+
+            -- If animal pixel: temperature must be within animal body temp range
             let ifAnimal = var2Bool (animal !! idx)
-            let animalTempConstraint = 
+            let animalTempConstraint =
                     ifAnimal ==> (measuredTemp .== tAnimal)
-            
-            -- もし非動物（背景）なら、地面温度範囲または太陽反射
+
+            -- If non-animal (background): temperature within ground range or solar reflection
             let notAnimal = bnot ifAnimal
-            let backgroundConstraint = 
+            let backgroundConstraint =
                     notAnimal ==> (measuredTemp .<= tSolar)
-            
+
             assert $ animalTempConstraint .&& backgroundConstraint
-        
-        -- === 物理的制約 ===
-        let physConstraints = do
-            -- 体温範囲
-            assert $ tAnimal .>= 350 .&& tAnimal .<= 440
-            -- 地面温度範囲
-            assert $ tGround .>= 150 .&& tGround .<= 500
-            -- 太陽反射範囲
-            assert $ tSolar .>= 450 .&& tSolar .<= 800
-            
-            -- 動物体温は地面より高い
-            assert $ tAnimal .> (tGround + 30)
-            -- 太陽反射は動物より高い
-            assert $ tSolar .> (tAnimal + 80)
-        
-        physConstraints
-        
-        -- === 空間的平滑化制約 ===
-        -- 動物領域は連結で、ノイズを含まない
+
+        -- === Physical Constraints ===
+        -- FIX: inlined from "let physConstraints = do" to avoid the layout-rule
+        -- ambiguity where the inner do-block opened at the same column (13) as
+        -- the let-binding itself, causing GHC parse error [GHC-58481] at line 105.
+        --
+        -- Body temperature range
+        assert $ tAnimal .>= 350 .&& tAnimal .<= 440
+        -- Ground temperature range
+        assert $ tGround .>= 150 .&& tGround .<= 500
+        -- Solar reflection range
+        assert $ tSolar  .>= 450 .&& tSolar  .<= 800
+        -- Animal body temp is higher than ground
+        assert $ tAnimal .> (tGround + 30)
+        -- Solar reflection is higher than animal temp
+        assert $ tSolar  .> (tAnimal + 80)
+
+        -- === Spatial Smoothing Constraints ===
+        -- Animal region is connected and noise-free
         forM_ [0..height-1] $ \y ->
             forM_ [0..width-1] $ \x -> do
                 let idx = y * width + x
-                -- 右隣との平滑化
+                -- Smoothing with right neighbor
                 when (x < width-1) $ do
-                    let rightIdx = y * width + (x+1)
-                    let sameAnimal = 
-                            (var2Bool $ animal !! idx) .== 
+                    let rightIdx   = y * width + (x+1)
+                    let sameAnimal =
+                            (var2Bool $ animal !! idx) .==
                             (var2Bool $ animal !! rightIdx)
-                    -- 同じ動物領域なら5℃以内、異なるなら制限なし
+                    -- If same animal region: within 5°C; otherwise no limit
                     let tempDiff = abs (thermalData ! idx - thermalData ! rightIdx)
-                    when (tempDiff <= 50) $  -- 5℃以内なら隣接可能性が高い
+                    when (tempDiff <= 50) $  -- high adjacency likelihood if within 5°C
                         assert $ sameAnimal .|| (tempDiff .> 50)
-        
-        -- === 最小領域サイズ制約 ===
-        -- 動物は最低4ピクセル以上（小さすぎるノイズを除去）
+
+        -- === Minimum Region Size Constraint ===
+        -- Animal region must have at least 4 pixels (to filter out small noise)
         let animalCount = sum [ite (var2Bool $ animal !! i) 1 0 | i <- [0..totalPixels-1]]
         assert $ animalCount .>= 4
-        
-        -- === 解探索 ===
-        -- 最大化：動物らしい領域の温度まとまり
-        setOption $ OptSoftTimeout (MicroSeconds 1000000)  -- 1秒タイムアウト
+
+        -- === Solution Search ===
+        setOption $ OptSoftTimeout (MicroSeconds 1000000)  -- 1-second timeout
         setOption $ OptVerbosity 1
-        
-        -- 目的関数：体温のまとまりを最大化
-        let variancePenalty = sum [ite (var2Bool $ animal !! i) 
-                                        (abs (thermalData ! i - tAnimal)) 
-                                        0 
-                                  | i <- [0..totalPixels-1]]
-        
-        -- 最小化：温度分散を最小にする解を選ぶ
+
+        -- Objective: minimize temperature variance inside the animal region
+        let variancePenalty = sum [ ite (var2Bool $ animal !! i)
+                                        (abs (thermalData ! i - tAnimal))
+                                        0
+                                  | i <- [0..totalPixels-1] ]
+
+        -- Minimize: choose solution with minimum temperature variance
         check $ Minimize $ MkPriorityLevel (mkSym "var") variancePenalty
-        
-        -- === モデル抽出 ===
+
+        -- === Model Extraction ===
         checkSat >>= \case
             Sat -> do
-                -- 各変数の値を取得
-                animalVals <- forM [0..totalPixels-1] $ \i -> 
+                -- Retrieve value of each variable
+                animalVals <- forM [0..totalPixels-1] $ \i ->
                     getValue (animal !! i)
                 return $ Just animalVals
-            Unsat -> return Nothing
+            Unsat   -> return Nothing
             Unknown -> return Nothing
-    
+
     return result
 
--- 太陽光反射のスペクトル特徴を検出
-detectSolarReflection :: 
+-- Detect spectral characteristics of solar reflection
+detectSolarReflection ::
     Vector TempScaled ->
-    IO [Int]  -- 疑わしい太陽反射ピクセル
+    IO [Int]  -- Suspected solar reflection pixels
 detectSolarReflection thermalData = runSolver @Yices $ do
-    -- 高温ピクセル用のブール変数
+    -- Boolean variables for high-temperature pixels
     isSolar <- forM [0..totalPixels-1] $ \_ -> var $ sort @Bool
-    
+
     forM_ [0..totalPixels-1] $ \idx -> do
         let temp = thermalData ! idx
-        
-        -- 太陽反射の特徴：
-        -- 1. 非常に高温（>50℃）
-        -- 2. 急峻な温度勾配（隣接より15℃以上高い）
-        -- 3. 孤立点（周囲は低温）
-        
-        let isHot = temp .>= 500  -- 50℃以上
-        let isIsolated = 
-                -- 周囲8ピクセルの平均より20℃以上高い
-                let neighbors = [idx - width - 1, idx - width, idx - width + 1,
-                                 idx - 1,                 idx + 1,
-                                 idx + width - 1, idx + width, idx + width + 1]
-                    validNeighbors = filter (\n -> n >=0 && n < totalPixels) neighbors
-                    avgNeighbor = sum [thermalData ! n | n <- validNeighbors] `div` 
-                                 (length validNeighbors)
-                in (temp - avgNeighbor) .>= 200  -- 20℃以上
-        
+
+        -- Solar reflection characteristics:
+        -- 1. Very high temperature (>50°C)
+        -- 2. Steep temperature gradient (15°C or more above adjacent pixels)
+        -- 3. Isolated point (surroundings are low temperature)
+
+        let isHot      = temp .>= 500  -- 50°C or above
+        let isIsolated =
+                -- At least 20°C higher than the average of surrounding 8 pixels
+                let neighbors      = [ idx - width - 1, idx - width, idx - width + 1
+                                     , idx - 1,                      idx + 1
+                                     , idx + width - 1, idx + width, idx + width + 1 ]
+                    validNeighbors = filter (\n -> n >= 0 && n < totalPixels) neighbors
+                    avgNeighbor    = sum [thermalData ! n | n <- validNeighbors]
+                                     `div` length validNeighbors
+                in (temp - avgNeighbor) .>= 200  -- 20°C or more
+
         assert $ var2Bool (isSolar !! idx) .== (isHot .&& isIsolated)
-    
+
     checkSat >>= \case
         Sat -> do
             solarVals <- forM [0..totalPixels-1] $ \i -> getValue (isSolar !! i)
-            return $ [i | (i, True) <- zip [0..] solarVals]
+            return [i | (i, True) <- zip [0..] solarVals]
         _ -> return []
 
--- 時系列データを使用したフィルタリング（動物体温は時間的に安定）
-temporalFilter :: 
-    [Vector TempScaled] ->  -- 過去フレーム（最新が最後）
-    IO [Bool]               -- 最新フレームの動物領域
+-- Temporal filtering using time-series data (animal body temp is temporally stable)
+temporalFilter ::
+    [Vector TempScaled] ->  -- Past frames (most recent is last)
+    IO [Bool]               -- Animal region in the latest frame
 temporalFilter frames = runSolver @Yices $ do
     let currentFrame = last frames
-    let prevFrame = if length frames >= 2 then frames !! (length frames - 2) else currentFrame
-    
+    let prevFrame    = if length frames >= 2
+                       then frames !! (length frames - 2)
+                       else currentFrame
+
     isAnimal <- forM [0..totalPixels-1] $ \_ -> var $ sort @Bool
-    
+
     forM_ [0..totalPixels-1] $ \idx -> do
         let currentTemp = currentFrame ! idx
-        let prevTemp = prevFrame ! idx
-        let tempDiff = abs (currentTemp - prevTemp)
-        
-        -- 動物体温はゆっくり変化（<0.5℃/フレーム @8Hz → <0.0625℃/秒）
-        let stableTemp = tempDiff .<= 5  -- 0.5℃以内
-        
-        -- 太陽反射は急激に変化（雲の動き、角度変化）
-        let rapidChange = tempDiff .>= 30  -- 3℃以上の変化
-        
-        assert $ var2Bool (isAnimal !! idx) .== (stableTemp .&& (bnot rapidChange))
-    
+        let prevTemp    = prevFrame    ! idx
+        let tempDiff    = abs (currentTemp - prevTemp)
+
+        -- Animal body temp changes slowly (<0.5°C/frame @8Hz → <0.0625°C/s)
+        let stableTemp  = tempDiff .<= 5   -- within 0.5°C
+
+        -- Solar reflection changes rapidly (cloud movement, angle change)
+        let rapidChange = tempDiff .>= 30  -- 3°C or more change
+
+        assert $ var2Bool (isAnimal !! idx) .== (stableTemp .&& bnot rapidChange)
+
     checkSat >>= \case
         Sat -> do
             animalVals <- forM [0..totalPixels-1] $ \i -> getValue (isAnimal !! i)
             return animalVals
         _ -> return $ replicate totalPixels False
 
--- === 統合推論パイプライン ===
+-- === Integrated Inference Pipeline ===
 analyzeThermalImage ::
-    Vector TempScaled ->               -- 現在フレーム
-    Maybe [Vector TempScaled] ->       -- 過去フレーム（時系列フィルタ用）
-    IO (Maybe AnimalDetectionResult)   -- 検出結果
+    Vector TempScaled ->              -- Current frame
+    Maybe [Vector TempScaled] ->      -- Past frames (for temporal filtering)
+    IO (Maybe AnimalDetectionResult)  -- Detection result
 analyzeThermalImage currentFrame pastFrames = do
-    -- ステップ1: 太陽反射の除外
+    -- Step 1: Exclude solar reflections
     solarPixels <- detectSolarReflection currentFrame
     putStrLn $ "Detected solar reflections: " ++ show (length solarPixels) ++ " pixels"
-    
-    -- ステップ2: 一時的フィルタ（時系列データがある場合）
+
+    -- Step 2: Temporal filter (when time-series data is available)
     temporalMask <- case pastFrames of
         Just frames -> temporalFilter (frames ++ [currentFrame])
-        Nothing -> return $ replicate totalPixels True
-    
-    -- ステップ3: SMTによる動物領域推論
-    -- 太陽反射ピクセルを事前にマスク
-    let filteredData = V.imap (\idx temp -> 
-                            if idx `elem` solarPixels 
-                            then 0  -- 太陽反射は除外
+        Nothing     -> return $ replicate totalPixels True
+
+    -- Step 3: SMT-based animal region inference
+    -- Pre-mask solar reflection pixels
+    let filteredData = V.imap (\idx temp ->
+                            if idx `elem` solarPixels
+                            then 0     -- exclude solar reflections
                             else temp) currentFrame
-    
+
     animalMask <- inferAnimalRegion filteredData
-    
-    -- ステップ4: 結果の統合
+
+    -- Step 4: Integrate results
     case animalMask of
         Just mask -> do
-            let finalMask = zipWith (&&) mask temporalMask
-            let animalPixels = length $ filter id finalMask
-            
-            -- 体温統計を計算
-            let animalTemps = [fromIntegral (currentFrame ! i) / 10.0 | 
-                              (i, isAnimal) <- zip [0..] finalMask, isAnimal]
-            
+            let finalMask      = zipWith (&&) mask temporalMask
+            let _animalPixels  = length $ filter id finalMask  -- reserved for future use
+
+            -- Compute body temperature statistics
+            let animalTemps = [ fromIntegral (currentFrame ! i) / 10.0
+                              | (i, isAnimal) <- zip [0..] finalMask
+                              , isAnimal ]
+
             return $ Just AnimalDetectionResult
-                { resultMask = finalMask
-                , animalTemperatureMean = if null animalTemps then 0 else sum animalTemps / fromIntegral (length animalTemps)
-                , animalTemperatureMin = if null animalTemps then 0 else minimum animalTemps
-                , animalTemperatureMax = if null animalTemps then 0 else maximum animalTemps
-                , solarReflections = solarPixels
+                { resultMask            = finalMask
+                , animalTemperatureMean = if null animalTemps then 0
+                                         else sum animalTemps / fromIntegral (length animalTemps)
+                , animalTemperatureMin  = if null animalTemps then 0 else minimum animalTemps
+                , animalTemperatureMax  = if null animalTemps then 0 else maximum animalTemps
+                , solarReflections      = solarPixels
                 }
         Nothing -> return Nothing
 
 data AnimalDetectionResult = AnimalDetectionResult
-    { resultMask :: [Bool]
+    { resultMask            :: [Bool]
     , animalTemperatureMean :: Double
-    , animalTemperatureMin :: Double
-    , animalTemperatureMax :: Double
-    , solarReflections :: [Int]
+    , animalTemperatureMin  :: Double
+    , animalTemperatureMax  :: Double
+    , solarReflections      :: [Int]
     } deriving (Show)
