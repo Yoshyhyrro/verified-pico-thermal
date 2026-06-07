@@ -101,7 +101,7 @@ main = do
     phony "test" $ do
       need ["build/testbench"]
       putNormal "Running tests..."
-      cmd_ (AddEnv "LANG" "C.UTF-8" "build/testbench" :: String)
+      cmd_ (AddEnv "LANG" "C.UTF-8") "build/testbench"
 
     -- Run simulation
     phony "sim" $ do
@@ -110,7 +110,7 @@ main = do
            , "build/testbench"
            ]
       putNormal "Running simulation..."
-      cmd_ (AddEnv "LANG" "C.UTF-8" "build/testbench --verilog verilog/generated/" :: String)
+      cmd_ (AddEnv "LANG" "C.UTF-8") "build/testbench --verilog verilog/generated/"
 
     -- Clean build artifacts
     phony "clean" $ do
