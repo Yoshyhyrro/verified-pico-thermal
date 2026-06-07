@@ -37,6 +37,7 @@ tests:
       - tasty >= 1.4
       - tasty-hunit >= 0.10
       - vector >= 0.13
+      - verified-pico-thermal
 
 default-extensions:
   - OverloadedStrings
