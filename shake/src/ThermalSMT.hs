@@ -12,9 +12,9 @@ import Prelude hiding (not, (&&))
 import Language.Hasmtlib                  -- exports Boolean, Orderable, Equatable, ite …
 import Data.Vector (Vector)               -- NOT (!): that would clash with Relation.!
 import qualified Data.Vector as V         -- use V.! throughout
-import Control.Monad (forM, forM_, when, join)
+import Control.Monad (forM, forM_, when)
 import Control.Monad.IO.Class (liftIO)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, join)
 
 -- ---------------------------------------------------------------------------
 -- Types
@@ -99,9 +99,13 @@ inferAnimalRegion thermalData = do
         forM_ [0..n-1] $ \idx -> do
             let measuredTemp = fromIntegral (thermalData V.! idx) :: Expr IntSort
 
-            -- Animal pixel  → temperature must equal the animal-body value
+            -- Animal pixel  → temperature must be within ±3 °C of the representative
+            -- body temperature.  Strict equality is intentionally avoided: real thermal
+            -- cameras produce slightly different readings across body regions.  Pixels
+            -- outside the window are automatically excluded by the implication.
             let isAnimal = animal !! idx
-            assert $ isAnimal ==> (measuredTemp === tAnimal)
+            assert $ isAnimal ==> (    measuredTemp >=? tAnimal - 30
+                                    && measuredTemp <=? tAnimal + 30 )
 
             -- Background pixel → temperature must be at most the solar spike
             assert $ not isAnimal ==> (measuredTemp <=? tSolar)
@@ -169,12 +173,15 @@ detectSolarReflection thermalData = return
                 [ idx - width - 1, idx - width, idx - width + 1
                 , idx - 1,                       idx + 1
                 , idx + width - 1, idx + width,  idx + width + 1 ]
-    , not (null neighbors)
-    -- 2. At least 20 °C hotter than the average of surrounding pixels
-    , let avgNeighbor =
-            sum [ thermalData V.! k | k <- neighbors ]
-            `div` length neighbors
-    , (temp - avgNeighbor) >= 200
+    -- 2. Compare against cool (non-solar) neighbours only.
+    --    Including other hot pixels in the average inflates it and causes
+    --    pixels at the edge of a solar cluster to fall below the threshold.
+    , let coolNeighbors = filter (\k -> thermalData V.! k < 500) neighbors
+    , not (null coolNeighbors)
+    , let avgCool =
+            sum [ thermalData V.! k | k <- coolNeighbors ]
+            `div` length coolNeighbors
+    , (temp - avgCool) >= 200    -- ≥ 20 °C above background
     ]
   where n = V.length thermalData
 
