@@ -12,9 +12,9 @@ import Prelude hiding (not, (&&))
 import Language.Hasmtlib                  -- exports Boolean, Orderable, Equatable, ite …
 import Data.Vector (Vector)               -- NOT (!): that would clash with Relation.!
 import qualified Data.Vector as V         -- use V.! throughout
-import Control.Monad (forM, forM_, when)
+import Control.Monad (forM, forM_, when, join)
 import Control.Monad.IO.Class (liftIO)
-import Data.Maybe (fromMaybe, join)
+import Data.Maybe (fromMaybe)
 
 -- ---------------------------------------------------------------------------
 -- Types
