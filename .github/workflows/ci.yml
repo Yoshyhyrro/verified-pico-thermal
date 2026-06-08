@@ -82,15 +82,14 @@ jobs:
         sbt compile
 
     # 9.5. Install Yices SMT Solver required for Thermal SMT Tests
+    # Corrected the release URL with exact case sensitivity (yices-2.6.4 in lowercase).
     - name: Install Yices2
       run: |
-        curl -L "https://github.com/SRI-CSL/yices2/releases/download/Yices-2.6.4/yices-2.6.4-x86_64-pc-linux-gnu-static-gmp.tar.gz" -o yices.tar.gz
+        curl -L "https://github.com/SRI-CSL/yices2/releases/download/yices-2.6.4/yices-2.6.4-x86_64-pc-linux-gnu-static-gmp.tar.gz" -o yices.tar.gz
         tar xzf yices.tar.gz
         sudo cp yices-2.6.4/bin/* /usr/local/bin/
         sudo cp -r yices-2.6.4/lib/* /usr/local/lib/
         sudo ldconfig
-
-
 
     # 10. Run the main build and test pipeline for C++ testbench and Shake rules
     - name: Build and Test
