@@ -84,10 +84,10 @@ jobs:
     # 9.5. Install Yices SMT Solver required for Thermal SMT Tests
     - name: Install Yices2
       run: |
-        curl -L "https://yices.csl.sri.com/cgi-bin/yices2-newnewdownload.cgi?file=yices2-x86_64-pc-linux-gnu-static-gmp.tar.gz" -o yices.tar.gz
+        curl -L "https://github.com/SRI-CSL/yices2/releases/download/Yices-2.6.4/yices-2.6.4-x86_64-pc-linux-gnu-static-gmp.tar.gz" -o yices.tar.gz
         tar xzf yices.tar.gz
-        sudo cp yices-*/bin/* /usr/local/bin/
-        sudo cp -r yices-*/lib/* /usr/local/lib/
+        sudo cp yices-2.6.4/bin/* /usr/local/bin/
+        sudo cp -r yices-2.6.4/lib/* /usr/local/lib/
         sudo ldconfig
 
 
