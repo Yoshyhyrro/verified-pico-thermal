@@ -79,10 +79,14 @@ jobs:
     - name: Verify Chisel (sbt compile)
       run: |
         cd chisel
-        # Compile the Chisel project and verify its formal models using sbt
         sbt compile
 
+    # 9.5. Install Yices SMT Solver required for Thermal SMT Tests
+    - name: Install Yices Solver
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y yices2
+
     # 10. Run the main build and test pipeline for C++ testbench and Shake rules
-    # Stack automatically picks up the stack.yaml in the root directory.
     - name: Build and Test
       run: stack test
