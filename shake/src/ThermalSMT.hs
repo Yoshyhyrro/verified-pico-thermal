@@ -12,9 +12,9 @@ import Prelude hiding (not, (&&))
 import Language.Hasmtlib                  -- exports Boolean, Orderable, Equatable, ite …
 import Data.Vector (Vector)               -- NOT (!): that would clash with Relation.!
 import qualified Data.Vector as V         -- use V.! throughout
-import Control.Monad (forM, forM_, when, join)
+import Control.Monad (forM, forM_, when)
 import Control.Monad.IO.Class (liftIO)
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, join)
 
 -- ---------------------------------------------------------------------------
 -- Types
@@ -76,14 +76,19 @@ inferAnimalRegion
     :: Vector TempScaled    -- ^ raw thermal frame (sensor value × 10)
     -> IO (Maybe [Bool])    -- ^ animal-region mask, or Nothing if UNSAT
 inferAnimalRegion thermalData = do
+    let n = V.length thermalData   -- actual frame size (may differ from totalPixels)
     mResult <- interactiveWith yices $ do
         setOption $ ProduceModels True
-        setOption $ Incremental   True
+        -- NOTE: do NOT send (set-option :incremental …) to Yices2.
+        -- Yices2 replies with the plain word "unsupported" instead of the
+        -- S-expression (error "…") form that hasmtlib's parser expects; the
+        -- parser falls to its catch-all branch which calls error "string".
+        -- interactiveWith already manages the incremental session internally.
         setLogic "QF_LIA"          -- quantifier-free linear integer arithmetic
 
         -- === Variable Declaration ===
         -- One Bool variable per pixel (is it an animal pixel?)
-        animal  <- forM [0..totalPixels-1] $ \_ -> var @BoolSort
+        animal  <- forM [0..n-1] $ \_ -> var @BoolSort
         -- Shared continuous temperatures
         tAnimal <- var @IntSort
         tGround <- var @IntSort
@@ -91,7 +96,7 @@ inferAnimalRegion thermalData = do
 
         -- === Measurement-Based Constraints ===
         -- Relate each pixel's measured temperature to the class variables.
-        forM_ [0..totalPixels-1] $ \idx -> do
+        forM_ [0..n-1] $ \idx -> do
             let measuredTemp = fromIntegral (thermalData V.! idx) :: Expr IntSort
 
             -- Animal pixel  → temperature must equal the animal-body value
@@ -128,7 +133,7 @@ inferAnimalRegion thermalData = do
         -- Require at least 4 animal pixels (filters single-pixel noise).
         let animalCount =
                 sum [ ite (animal !! i) (1 :: Expr IntSort) 0
-                    | i <- [0..totalPixels-1] ]
+                    | i <- [0..n-1] ]
         assert $ animalCount >=? 4
 
         -- === Solve & Extract ===
@@ -136,7 +141,7 @@ inferAnimalRegion thermalData = do
             Sat -> do
                 -- getValue returns Maybe (HaskellType t):
                 --   Expr BoolSort  →  Maybe Bool
-                animalVals <- forM [0..totalPixels-1] $ \i ->
+                animalVals <- forM [0..n-1] $ \i ->
                     getValue (animal !! i)
                 return $ Just (map (fromMaybe False) animalVals)
             _   -> return Nothing
@@ -155,22 +160,23 @@ detectSolarReflection
     -> IO [Int]          -- suspected solar-reflection pixel indices
 detectSolarReflection thermalData = return
     [ idx
-    | idx <- [0..totalPixels-1]
+    | idx <- [0..n-1]      -- n = actual frame size, NOT the global totalPixels
     , let temp = thermalData V.! idx
     -- 1. Very high temperature (≥ 50 °C)
     , temp >= 500
     , let neighbors =
-            filter (\n -> n >= 0 && n < totalPixels)
+            filter (\k -> k >= 0 && k < n)   -- bound by actual length
                 [ idx - width - 1, idx - width, idx - width + 1
                 , idx - 1,                       idx + 1
                 , idx + width - 1, idx + width,  idx + width + 1 ]
     , not (null neighbors)
     -- 2. At least 20 °C hotter than the average of surrounding pixels
     , let avgNeighbor =
-            sum [ thermalData V.! n | n <- neighbors ]
+            sum [ thermalData V.! k | k <- neighbors ]
             `div` length neighbors
     , (temp - avgNeighbor) >= 200
     ]
+  where n = V.length thermalData
 
 -- ---------------------------------------------------------------------------
 -- Temporal filter (pure Haskell)
@@ -186,7 +192,7 @@ temporalFilter frames = return
           pt = prevFrame    V.! idx
           d  = abs (ct - pt)
       in  d <= 5 && not (d >= 30)   -- stable AND not rapidly-changing
-    | idx <- [0..totalPixels-1]
+    | idx <- [0..V.length currentFrame - 1]   -- use actual frame size
     ]
   where
     currentFrame = last frames
@@ -213,7 +219,7 @@ analyzeThermalImage currentFrame pastFrames = do
     -- Step 2: temporal filter (when history is available)
     temporalMask <- case pastFrames of
         Just frames -> temporalFilter (frames ++ [currentFrame])
-        Nothing     -> return $ replicate totalPixels True
+        Nothing     -> return $ replicate (V.length currentFrame) True
 
     -- Step 3: SMT-based animal-region inference on the masked frame
     let filteredData = V.imap
