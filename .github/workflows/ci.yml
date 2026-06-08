@@ -43,11 +43,11 @@ jobs:
     # 4. Initialize Shake build system to generate default template files
     # We do this first so that Main.hs does not overwrite Siunertaq's files later.
     # Note: '|| true' ensures the pipeline continues even if 'stack run init' is configured differently.
-    # '--no-update-index' prevents unnecessary package index processing that causes massive slowdowns.
     - name: Initialize Shake Build System
-      run: stack run init --no-update-index || true
+      run: stack run init || true
 
     # 5. Clone the Siunertaq repository into a temporary directory
+    # (Used for verification setup below)
     - name: Clone Siunertaq Repository
       uses: actions/checkout@v4
       with:
@@ -84,6 +84,5 @@ jobs:
 
     # 10. Run the main build and test pipeline for C++ testbench and Shake rules
     # Stack automatically picks up the stack.yaml in the root directory.
-    # '--no-update-index' is heavily required here to avoid "Processed XXX cabal files" lags.
     - name: Build and Test
-      run: stack test --no-update-index
+      run: stack test
