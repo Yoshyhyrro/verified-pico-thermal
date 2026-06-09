@@ -1,7 +1,7 @@
 # verified-pico-thermal
 
 A Haskell library that uses an SMT solver to classify pixels in a thermal camera frame, distinguishing animal body heat from ground background and solar reflections.
-The project also integrates a Chisel hardware module ([Siunertaq](https://github.com/Yoshyhyrro/Siunertaq)) compiled through SBT, with a Shake-based build system orchestrating the full pipeline.
+<s>The project also integrates a Chisel hardware module ([Siunertaq](https://github.com/Yoshyhyrro/Siunertaq)) compiled through SBT, with a Shake-based build system orchestrating the full pipeline.</s>
 
 ---
 
