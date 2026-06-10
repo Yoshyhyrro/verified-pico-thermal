@@ -76,7 +76,10 @@ main = do
       need ["chisel/build.sbt"]
 
       -- Run sbt
-      cmd_ $ "cd chisel && sbt \"runMain top." ++ moduleName ++ "\""
+      -- Cwd changes the working directory for this cmd_ call without going
+      -- through a shell. Using "cd chisel && sbt ..." would fail because
+      -- Shake's cmd_ calls execvp directly and cd is a shell builtin.
+      cmd_ (Cwd "chisel") ("sbt" :: String) ("runMain top." ++ moduleName)
 
       -- Copy generated file to output location
       let generatedPath = "chisel/generated/" ++ moduleName ++ ".v"
@@ -129,8 +132,9 @@ main = do
         else do
           putNormal $ "Emitting FIRRTL for " ++ moduleName ++ " (fallback sbt run)..."
           need ["chisel/build.sbt"]
-          cmd_ $ "cd chisel && sbt \"runMain top." ++ moduleName
-                   ++ " --target-dir generated --emission-options emitIntermediateFiles\""
+          cmd_ (Cwd "chisel") ("sbt" :: String)
+                 ("runMain top." ++ moduleName
+                  ++ " --target-dir generated --emission-options emitIntermediateFiles")
           existsAfter <- doesFileExist firSrc
           when existsAfter $ copyFile' firSrc out
 
