@@ -84,18 +84,55 @@ main = do
       when exists $ copyFile' generatedPath out
 
     -- C++ project build
+    -- cmake builds both the testbench and libmlx90640_model.so in one pass
+    -- because the testbench target links against the shared library.
+    -- -DUBUNTU_26=ON activates the C++26 branch in CMakeLists.txt.
     "build/testbench" %> \out -> do
       let buildDir = "cpp/build"
       need [ "cpp/CMakeLists.txt"
            , "cpp/src/testbench.cpp"
            , "cpp/src/mlx90640_model.cpp"
+           , "cpp/include/mlx90640_model.h"
            ]
-
-      putNormal "Building C++ testbench..."
-      -- Note the space after "-B" and "--build" to avoid "cmake -Bcpp/build"
-      cmd_ $ "cmake -B " ++ buildDir ++ " -S cpp -DCMAKE_BUILD_TYPE=Release"
-      cmd_ $ "cmake --build " ++ buildDir ++ " --target testbench -j4"
+      putNormal "Building C++ testbench and shared library..."
+      let u26Flag = if isU26 then " -DUBUNTU_26=ON" else ""
+      cmd_ $ "cmake -B " ++ buildDir ++ " -S cpp -DCMAKE_BUILD_TYPE=Release" ++ u26Flag
+      cmd_ $ "cmake --build " ++ buildDir ++ " -j4"
       copyFile' (buildDir </> "testbench") out
+
+    -- Shared library artifact
+    -- Depends on "build/testbench" so the cmake build always runs first.
+    -- libmlx90640_model.so lands in cpp/build/lib/ via LIBRARY_OUTPUT_DIRECTORY.
+    "build/lib/libmlx90640_model.so" %> \out -> do
+      need ["build/testbench"]
+      let soSrc = "cpp/build" </> "lib" </> "libmlx90640_model.so"
+      exists <- doesFileExist soSrc
+      if exists
+        then copyFile' soSrc out
+        else error "libmlx90640_model.so not found; cmake may have produced a static build"
+
+    -- Chisel -> FIRRTL intermediate representation
+    -- ChiselStage emits .fir alongside .v when --emission-options
+    -- emitIntermediateFiles is passed, so we first ensure the Verilog rule
+    -- has run (same sbt invocation), then copy the .fir from chisel/generated/.
+    -- If the .fir is missing (App object does not pass the flag), a fallback
+    -- sbt run explicitly requests FIRRTL emission.
+    "firrtl/generated/*.fir" %> \out -> do
+      let moduleName = takeBaseName out
+      need ["verilog/generated/" ++ moduleName ++ ".v"]
+      let firSrc = "chisel/generated/" ++ moduleName ++ ".fir"
+      exists <- doesFileExist firSrc
+      if exists
+        then do
+          putNormal $ "Copying FIRRTL for " ++ moduleName
+          copyFile' firSrc out
+        else do
+          putNormal $ "Emitting FIRRTL for " ++ moduleName ++ " (fallback sbt run)..."
+          need ["chisel/build.sbt"]
+          cmd_ $ "cd chisel && sbt \"runMain top." ++ moduleName
+                   ++ " --target-dir generated --emission-options emitIntermediateFiles\""
+          existsAfter <- doesFileExist firSrc
+          when existsAfter $ copyFile' firSrc out
 
     -- Run tests
     phony "test" $ do
@@ -103,24 +140,52 @@ main = do
       putNormal "Running tests..."
       cmd_ (AddEnv "LANG" "C.UTF-8") ("build/testbench" :: String)
 
-    -- Run simulation
+    -- Run simulation (requires both Verilog and FIRRTL for the two RTL modules)
     phony "sim" $ do
-      need [ "verilog/generated/I2CMaster.v"
-           , "verilog/generated/ThermalNormalizer.v"
-           , "build/testbench"
-           ]
+      let modules = ["I2CMaster", "ThermalNormalizer"]
+      need $  ["build/testbench"]
+           ++ map (\m -> "verilog/generated/" ++ m ++ ".v")   modules
+           ++ map (\m -> "firrtl/generated/"  ++ m ++ ".fir") modules
       putNormal "Running simulation..."
       cmd_ (AddEnv "LANG" "C.UTF-8") ("build/testbench --verilog verilog/generated/" :: String)
 
-    -- Clean build artifacts
+    -- Collect release artifacts into dist/ and create a tarball
+    -- Artifacts included:
+    --   dist/lib/libmlx90640_model.so   -- C++26 shared library
+    --   dist/include/mlx90640_model.h   -- public header
+    --   dist/verilog/<Module>.v         -- Chisel-generated RTL
+    --   dist/firrtl/<Module>.fir        -- FIRRTL intermediate
+    --   dist/verified-pico-thermal.tar.gz
+    phony "release" $ do
+      let modules = ["I2CMaster", "ThermalNormalizer"]
+      need $  [ "build/lib/libmlx90640_model.so"
+              , "build/testbench"
+              ]
+           ++ map (\m -> "verilog/generated/" ++ m ++ ".v")   modules
+           ++ map (\m -> "firrtl/generated/"  ++ m ++ ".fir") modules
+
+      putNormal "Staging release artifacts into dist/..."
+      copyFile' "build/lib/libmlx90640_model.so"  "dist/lib/libmlx90640_model.so"
+      copyFile' "cpp/include/mlx90640_model.h"    "dist/include/mlx90640_model.h"
+
+      forM_ modules $ \m -> do
+        copyFile' ("verilog/generated/" ++ m ++ ".v")   ("dist/verilog/" ++ m ++ ".v")
+        copyFile' ("firrtl/generated/"  ++ m ++ ".fir") ("dist/firrtl/"  ++ m ++ ".fir")
+
+      -- Pack into a single tarball for GitHub Releases upload
+      cmd_ "tar -czf dist/verified-pico-thermal.tar.gz -C dist lib include verilog firrtl"
+      putNormal "Release artifact ready: dist/verified-pico-thermal.tar.gz"
+
+    -- Clean all build artifacts including release staging
     phony "clean" $ do
       putNormal "Cleaning build artifacts..."
-      liftIO $ callCommand "rm -rf build/ verilog/generated/ cpp/build/ chisel/generated/"
+      liftIO $ callCommand
+        "rm -rf build/ verilog/generated/ firrtl/generated/ cpp/build/ chisel/generated/ dist/"
       removeFilesAfter "_shake" ["*"]
 
     -- CI target
     phony "ci" $ do
-      need ["init", "test"]
+      need ["init", "test", "release"]
       putNormal "CI build completed successfully"
 
     -- Default targets
@@ -142,6 +207,13 @@ initDirectories = do
              , "scripts"
              , "verilog/generated"
              , "build"
+             , "build/lib"        -- shared library output (.so)
+             , "firrtl/generated" -- FIRRTL intermediate representation
+             , "dist"             -- release artifact staging area
+             , "dist/lib"
+             , "dist/include"
+             , "dist/verilog"
+             , "dist/firrtl"
              ]
   forM_ dirs $ \dir -> do
     putStrLn $ "  Creating: " ++ dir
@@ -159,20 +231,42 @@ generateTemplateFiles isU26 = do
     , "scalacOptions ++= Seq(\"-Xsource:2.13\", \"-deprecation\", \"-feature\")"
     ]
 
-  -- CMakeLists.txt (Includes a branch for Ubuntu 26)
+  -- CMakeLists.txt
+  -- On Ubuntu 26 the system ships GCC 15 / Clang 19 with C++26 support.
+  -- The shared library is built with POSITION_INDEPENDENT_CODE so it can be
+  -- dlopen'd at runtime; the testbench links against it dynamically.
+  let cxxStd = if isU26 then "26" else "17" :: String
   writeFile "cpp/CMakeLists.txt" $ unlines $
-    [ "cmake_minimum_required(VERSION 3.10)"
+    [ "cmake_minimum_required(VERSION 3.16)"
     , "project(ThermalCameraTest)"
-    , "set(CMAKE_CXX_STANDARD 17)"
-    ] ++ 
-    -- Branch specific for Ubuntu 26
-    (if isU26 then ["add_compile_options(-DUBUNTU_26)"] else []) ++
-    [ "include_directories(include)"
-    , "add_executable(testbench"
-    , "    src/testbench.cpp"
+    , ""
+    , "# C++ standard: C++26 on Ubuntu 26, C++17 elsewhere"
+    , "option(UBUNTU_26 \"Build with Ubuntu 26 / C++26 settings\" OFF)"
+    , "if(UBUNTU_26)"
+    , "  set(CMAKE_CXX_STANDARD 26)"
+    , "else()"
+    , "  set(CMAKE_CXX_STANDARD " ++ cxxStd ++ ")"
+    , "endif()"
+    , "set(CMAKE_CXX_STANDARD_REQUIRED ON)"
+    , ""
+    , "include_directories(include)"
+    , ""
+    , "# Shared library: MLX90640 thermal sensor I2C model"
+    , "# POSITION_INDEPENDENT_CODE is required for .so output."
+    , "add_library(mlx90640_model SHARED"
     , "    src/mlx90640_model.cpp"
     , ")"
-    , "target_link_libraries(testbench pthread)"
+    , "target_include_directories(mlx90640_model PUBLIC include)"
+    , "set_target_properties(mlx90640_model PROPERTIES"
+    , "    POSITION_INDEPENDENT_CODE ON"
+    , "    LIBRARY_OUTPUT_DIRECTORY \"${CMAKE_BINARY_DIR}/lib\""
+    , ")"
+    , ""
+    , "# Testbench executable: links against the shared library"
+    , "add_executable(testbench"
+    , "    src/testbench.cpp"
+    , ")"
+    , "target_link_libraries(testbench PRIVATE mlx90640_model pthread)"
     ]
 
   -- Template header
@@ -246,6 +340,7 @@ generateTemplateFiles isU26 = do
     , ".stack-work/"
     , "_shake/"
     , "bin/"
+    , "dist/"
     ]
 
   -- README
