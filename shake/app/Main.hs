@@ -172,8 +172,9 @@ main = do
         copyFile' ("verilog/generated/" ++ m ++ ".v")   ("dist/verilog/" ++ m ++ ".v")
         copyFile' ("firrtl/generated/"  ++ m ++ ".fir") ("dist/firrtl/"  ++ m ++ ".fir")
 
-      -- Pack into a single tarball for GitHub Releases upload
-      cmd_ "tar -czf dist/verified-pico-thermal.tar.gz -C dist lib include verilog firrtl"
+      -- :: String annotation is required because OverloadedStrings makes bare
+      -- literals polymorphic; cmd_ cannot resolve IsCmdArgument without it.
+      cmd_ ("tar -czf dist/verified-pico-thermal.tar.gz -C dist lib include verilog firrtl" :: String)
       putNormal "Release artifact ready: dist/verified-pico-thermal.tar.gz"
 
     -- Clean all build artifacts including release staging
