@@ -2,9 +2,9 @@ name: Haskell CI (Stack)
 
 on:
   push:
-    branches: [ "feature/init" ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ "feature/init" ]
+    branches: [ "main" ]
 
 permissions:
   contents: read
