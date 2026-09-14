@@ -75,11 +75,11 @@ jobs:
     - name: Setup SBT
       uses: sbt/setup-sbt@v1
 
-    # 9. Run Chisel compilation and verification using Siunertaq
-    - name: Verify Chisel (sbt compile)
+    # 9. Run full compilation followed by targeted Siunertaq test tasks
+    - name: Verify Chisel and Siunertaq Tasks
       run: |
         cd chisel
-        sbt compile
+        sbt compile "dhallBridge/testOnly io.siunertaq.batch.CondEvaluatorSpec" "batchBridge/compile"
 
     # 9.5. Install Yices SMT Solver required for Thermal SMT Tests
     # Corrected the release URL with exact case sensitivity (Yices2 in uppercase).
