@@ -20,14 +20,14 @@ jobs:
     
     # 2. Setup Haskell Stack environment
     - name: Setup Haskell Stack
-      uses: haskell-actions/setup@v2
+      uses: haskell-actions/setup@v2.12.1
       with:
         enable-stack: true
         stack-no-global: true
 
     # 3. Cache Stack dependencies
     - name: Cache Stack
-      uses: actions/cache@v4
+      uses: actions/cache@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
       env:
         cache-name: cache-stack
       with:
@@ -49,7 +49,7 @@ jobs:
     # 5. Clone the Siunertaq repository into a temporary directory
     # (Used for verification setup below)
     - name: Clone Siunertaq Repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
       with:
         repository: 'Yoshyhyrro/Siunertaq'
         path: 'siunertaq_tmp'
@@ -64,7 +64,7 @@ jobs:
 
     # 7. Setup Java environment required for Chisel and sbt
     - name: Setup JDK 17
-      uses: actions/setup-java@v4
+      uses: actions/setup-java@v6
       with:
         distribution: 'temurin'
         java-version: '17'
@@ -73,7 +73,7 @@ jobs:
     # 8. Setup SBT CLI environment
     # Since ubuntu-latest (Ubuntu 24.04+) does not pre-install sbt, we explicitly install it here.
     - name: Setup SBT
-      uses: sbt/setup-sbt@v1
+      uses: sbt/setup-sbt@v1.5.15
 
     # 9. Run full compilation followed by targeted Siunertaq test tasks
     - name: Verify Chisel and Siunertaq Tasks
