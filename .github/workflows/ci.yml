@@ -16,7 +16,7 @@ jobs:
     steps:
     # 1. Checkout the current target repository
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
     
     # 2. Setup Haskell Stack environment
     - name: Setup Haskell Stack
