@@ -27,7 +27,7 @@ jobs:
 
     # 3. Cache Stack dependencies
     - name: Cache Stack
-      uses: actions/cache@f548e57e544e1ff5a4c46bf1e1b8685f8e4a348a
+      uses: actions/cache@v6.1.0
       env:
         cache-name: cache-stack
       with:
